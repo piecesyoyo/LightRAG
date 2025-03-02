@@ -1,0 +1,13 @@
+{
+  "hybrid": {
+    "c36b2a706b0fa9596800ef3d3e8b7d53": {
+      "return": "{\"high_level_keywords\": [\"Geography\", \"Country capitals\", \"National identity\"], \"low_level_keywords\": [\"France\", \"Paris\"]}",
+      "cache_type": "keywords",
+      "embedding": null,
+      "embedding_shape": null,
+      "embedding_min": null,
+      "embedding_max": null,
+      "original_prompt": "What is the capital of France?"
+    }
+  }
+}

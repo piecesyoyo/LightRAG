@@ -119,6 +119,11 @@ async def openai_complete_if_cache(
         )
         raise
 
+    # 自己添加的代码
+    # if hasattr(response.choices[0].message, "reasoning_content"):
+    #     print("///// reasoning content /////")
+    #     print(response.choices[0].message.reasoning_content)
+
     if hasattr(response, "__aiter__"):
 
         async def inner():
