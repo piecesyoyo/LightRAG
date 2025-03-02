@@ -141,17 +141,18 @@ async def _handle_single_entity_extraction(
     if len(record_attributes) < 4 or record_attributes[0] != '"entity"':
         return None
     # add this record as a node in the G
-    entity_name = clean_str(record_attributes[1].upper())
+    entity_name = clean_str(record_attributes[1]).strip('"')
     if not entity_name.strip():
         return None
-    entity_type = clean_str(record_attributes[2].upper())
-    entity_description = clean_str(record_attributes[3])
+    entity_type = clean_str(record_attributes[2]).strip('"')
+    entity_description = clean_str(record_attributes[3]).strip('"')
     entity_source_id = chunk_key
     return dict(
         entity_name=entity_name,
         entity_type=entity_type,
         description=entity_description,
         source_id=entity_source_id,
+        metadata={"created_at": time.time()},
     )
 
 
@@ -162,14 +163,15 @@ async def _handle_single_relationship_extraction(
     if len(record_attributes) < 5 or record_attributes[0] != '"relationship"':
         return None
     # add this record as edge
-    source = clean_str(record_attributes[1].upper())
-    target = clean_str(record_attributes[2].upper())
-    edge_description = clean_str(record_attributes[3])
-
-    edge_keywords = clean_str(record_attributes[4])
+    source = clean_str(record_attributes[1]).strip('"')
+    target = clean_str(record_attributes[2]).strip('"')
+    edge_description = clean_str(record_attributes[3]).strip('"')
+    edge_keywords = clean_str(record_attributes[4]).strip('"')
     edge_source_id = chunk_key
     weight = (
-        float(record_attributes[-1]) if is_float_regex(record_attributes[-1]) else 1.0
+        float(record_attributes[-1].strip('"'))
+        if is_float_regex(record_attributes[-1])
+        else 1.0
     )
     return dict(
         src_id=source,
@@ -323,6 +325,7 @@ async def _merge_edges_then_upsert(
         tgt_id=tgt_id,
         description=description,
         keywords=keywords,
+        source_id=source_id,
     )
 
     return edge_data
@@ -362,7 +365,7 @@ async def extract_entities(
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         record_delimiter=PROMPTS["DEFAULT_RECORD_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
-        entity_types=",".join(entity_types),
+        entity_types=", ".join(entity_types),
         language=language,
     )
     # add example's format
@@ -546,8 +549,13 @@ async def extract_entities(
     if entity_vdb is not None:
         data_for_vdb = {
             compute_mdhash_id(dp["entity_name"], prefix="ent-"): {
-                "content": dp["entity_name"] + dp["description"],
                 "entity_name": dp["entity_name"],
+                "entity_type": dp["entity_type"],
+                "content": f"{dp['entity_name']}\n{dp['description']}",
+                "source_id": dp["source_id"],
+                "metadata": {
+                    "created_at": dp.get("metadata", {}).get("created_at", time.time())
+                },
             }
             for dp in all_entities_data
         }
@@ -558,10 +566,9 @@ async def extract_entities(
             compute_mdhash_id(dp["src_id"] + dp["tgt_id"], prefix="rel-"): {
                 "src_id": dp["src_id"],
                 "tgt_id": dp["tgt_id"],
-                "content": dp["keywords"]
-                + dp["src_id"]
-                + dp["tgt_id"]
-                + dp["description"],
+                "keywords": dp["keywords"],
+                "content": f"{dp['src_id']}\t{dp['tgt_id']}\n{dp['keywords']}\n{dp['description']}",
+                "source_id": dp["source_id"],
                 "metadata": {
                     "created_at": dp.get("metadata", {}).get("created_at", time.time())
                 },
@@ -581,7 +588,7 @@ async def kg_query(
     global_config: dict[str, str],
     hashing_kv: BaseKVStorage | None = None,
     system_prompt: str | None = None,
-) -> str:
+) -> str | AsyncIterator[str]:
     # Handle cache
     use_model_func = global_config["llm_model_func"]
     args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
@@ -957,7 +964,7 @@ async def mix_kg_vector_query(
         stream=query_param.stream,
     )
 
-    # 清理响应内容
+    # Clean up response content
     if isinstance(response, str) and len(response) > len(sys_prompt):
         response = (
             response.replace(sys_prompt, "")
@@ -969,7 +976,7 @@ async def mix_kg_vector_query(
             .strip()
         )
 
-        # 7. Save cache - 只有在收集完整响应后才缓存
+        # 7. Save cache - Only cache after collecting complete response
         await save_to_cache(
             hashing_kv,
             CacheData(
@@ -1113,7 +1120,7 @@ async def _get_node_data(
     len_node_datas = len(node_datas)
     node_datas = truncate_list_by_token_size(
         node_datas,
-        key=lambda x: x["description"],
+        key=lambda x: x["description"] if x["description"] is not None else "",
         max_token_size=query_param.max_token_for_local_context,
     )
     logger.debug(
@@ -1125,8 +1132,19 @@ async def _get_node_data(
     )
 
     # build prompt
-    entites_section_list = [["id", "entity", "type", "description", "rank"]]
+    entites_section_list = [
+        [
+            "id",
+            "entity",
+            "type",
+            "description",
+            "rank" "created_at",
+        ]
+    ]
     for i, n in enumerate(node_datas):
+        created_at = n.get("created_at", "UNKNOWN")
+        if isinstance(created_at, (int, float)):
+            created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
         entites_section_list.append(
             [
                 i,
@@ -1134,6 +1152,7 @@ async def _get_node_data(
                 n.get("entity_type", "UNKNOWN"),
                 n.get("description", "UNKNOWN"),
                 n["rank"],
+                created_at,
             ]
         )
     entities_context = list_of_list_to_csv(entites_section_list)
@@ -1296,7 +1315,7 @@ async def _find_most_related_edges_from_entities(
     )
     all_edges_data = truncate_list_by_token_size(
         all_edges_data,
-        key=lambda x: x["description"],
+        key=lambda x: x["description"] if x["description"] is not None else "",
         max_token_size=query_param.max_token_for_global_context,
     )
 
@@ -1350,7 +1369,7 @@ async def _get_edge_data(
     )
     edge_datas = truncate_list_by_token_size(
         edge_datas,
-        key=lambda x: x["description"],
+        key=lambda x: x["description"] if x["description"] is not None else "",
         max_token_size=query_param.max_token_for_global_context,
     )
     use_entities, use_text_units = await asyncio.gather(
@@ -1398,6 +1417,10 @@ async def _get_edge_data(
 
     entites_section_list = [["id", "entity", "type", "description", "rank"]]
     for i, n in enumerate(use_entities):
+        created_at = e.get("created_at", "Unknown")
+        # Convert timestamp to readable format
+        if isinstance(created_at, (int, float)):
+            created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
         entites_section_list.append(
             [
                 i,
@@ -1405,6 +1428,7 @@ async def _get_edge_data(
                 n.get("entity_type", "UNKNOWN"),
                 n.get("description", "UNKNOWN"),
                 n["rank"],
+                created_at,
             ]
         )
     entities_context = list_of_list_to_csv(entites_section_list)
@@ -1454,7 +1478,7 @@ async def _find_most_related_entities_from_relationships(
     len_node_datas = len(node_datas)
     node_datas = truncate_list_by_token_size(
         node_datas,
-        key=lambda x: x["description"],
+        key=lambda x: x["description"] if x["description"] is not None else "",
         max_token_size=query_param.max_token_for_local_context,
     )
     logger.debug(
@@ -1763,6 +1787,8 @@ async def kg_query_with_keywords(
         system_prompt=sys_prompt,
         stream=query_param.stream,
     )
+
+    # 清理响应内容
     if isinstance(response, str) and len(response) > len(sys_prompt):
         response = (
             response.replace(sys_prompt, "")
@@ -1774,18 +1800,19 @@ async def kg_query_with_keywords(
             .strip()
         )
 
-    # Save to cache
-    await save_to_cache(
-        hashing_kv,
-        CacheData(
-            args_hash=args_hash,
-            content=response,
-            prompt=query,
-            quantized=quantized,
-            min_val=min_val,
-            max_val=max_val,
-            mode=query_param.mode,
-            cache_type="query",
-        ),
-    )
+        # 7. Save cache - 只有在收集完整响应后才缓存
+        await save_to_cache(
+            hashing_kv,
+            CacheData(
+                args_hash=args_hash,
+                content=response,
+                prompt=query,
+                quantized=quantized,
+                min_val=min_val,
+                max_val=max_val,
+                mode=query_param.mode,
+                cache_type="query",
+            ),
+        )
+
     return response

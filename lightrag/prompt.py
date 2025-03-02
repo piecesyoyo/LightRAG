@@ -48,8 +48,9 @@ Format the content-level key words as ("content_keywords"{tuple_delimiter}<high_
 #############################
 ---Real Data---
 ######################
-Entity_types: {entity_types}
-Text: {input_text}
+Entity_types: [{entity_types}]
+Text:
+{input_text}
 ######################
 Output:"""
 
